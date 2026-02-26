@@ -206,8 +206,13 @@ public class RealTimeTracker implements Listener {
     }
 
     /**
-     * Consistency catch-all: scans a container's full contents when a player closes it,
+     * Consistency catch-all: scans a real container's full contents when a player closes it,
      * updating registry locations for all maces found.
+     * <p>
+     * Workstation GUIs (anvil, crafting table, grindstone, etc.) are intentionally skipped —
+     * maces in those inventories are already tracked by {@link #onInventoryClick} and
+     * {@link #onInventoryMoveItem}, and their result slots contain virtual preview items
+     * that would trigger false-positive unregistered/duplicate detections.
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClose(InventoryCloseEvent event) {
@@ -216,6 +221,18 @@ public class RealTimeTracker implements Listener {
 
         // Only scan non-player inventories (chests, barrels, etc.)
         if (inv.getType() == InventoryType.PLAYER || inv.getType() == InventoryType.CREATIVE) return;
+
+        // Skip workstation GUIs — maces inside them are already tracked by InventoryClickEvent
+        // and InventoryMoveItemEvent. Scanning workstations here causes two false positives:
+        //   1. Crafting table result slot shows a vanilla (unregistered) mace preview when
+        //      the player has a mace recipe ready, triggering a spurious "Unregistered mace deleted".
+        //   2. Anvil/grindstone/smithing result slots hold a copy of the tracked mace with the
+        //      same UID as the input slot, which can trigger a spurious "Duplicate mace confiscated".
+        switch (inv.getType()) {
+            case ANVIL, WORKBENCH, GRINDSTONE, SMITHING, ENCHANTING, STONECUTTER,
+                 CARTOGRAPHY, LOOM, BLAST_FURNACE, SMOKER, FURNACE -> { return; }
+            default -> { /* fall through to scan real containers */ }
+        }
 
         MaceLocationType locType = classifyInventory(inv, player);
         Location invLoc = resolveInventoryLocation(inv, player);
