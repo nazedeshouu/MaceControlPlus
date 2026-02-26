@@ -1,0 +1,21 @@
+name: MaceControl+
+version: '1.0.0'
+main: com.macecontrol.MaceControl
+api-version: '1.21'
+description: Adaptive mace tracking and management plugin for Paper 1.21.10+
+authors:
+  - nazedeshou
+website: https://github.com/nazedeshou/MaceControlPlus
+
+commands:
+  mace:
+    description: MaceControl+ command. Shows mace status publicly; sub-commands require macecontrol.admin.
+    usage: /<command> [list|locate|give|revoke|return|settier|setslots|scan|info|audit|reload]
+    permission: ""
+    aliases:
+      - macecontrol
+
+permissions:
+  macecontrol.admin:
+    description: Access to all MaceControl+ admin sub-commands.
+    default: op

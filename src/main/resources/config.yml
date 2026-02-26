@@ -1,0 +1,100 @@
+# ============================================
+#       MaceControl+ Configuration
+# ============================================
+
+# --- Slot Management ---
+# Independent slot limits per tier.
+# Total mace capacity = max-normal-mace-limit + max-full-mace-limit.
+
+# Maximum LIMITED (standard) maces allowed in circulation at once.
+max-normal-mace-limit: 4
+
+# Maximum FULL (legendary) maces allowed in circulation at once.
+max-full-mace-limit: 1
+
+# --- Scan Settings ---
+scan:
+  # Minimum minutes between automatic deep scans.
+  interval-min-minutes: 120
+  # Maximum minutes between automatic deep scans (chosen randomly in range).
+  interval-max-minutes: 360
+  # How many consecutive missed scans (where location was accessible) before a mace is declared destroyed.
+  missed-scans-to-destroy: 4
+  # If true, the scanner will temporarily force-load chunks that contain a mace's last known location.
+  force-load-chunks: false
+  # If true, the scanner will read offline player data files to locate maces held by offline players.
+  scan-offline-players: true
+  # How many minutes before a mace's location data is considered stale (triggers a rescan on /mace locate).
+  stale-threshold-minutes: 30
+
+# --- Enchantment Tiers ---
+tiers:
+  LIMITED:
+    # Display name shown in lore and messages.
+    display-name: "§7Standard"
+    # Enchantments allowed for this tier. Any others will be stripped or blocked.
+    allowed-enchantments:
+      - WIND_BURST
+      - UNBREAKING
+      - MENDING
+  FULL:
+    display-name: "§bLegendary"
+    # Use the special value ALL to permit every enchantment with no restrictions.
+    allowed-enchantments: ALL
+
+# --- Crafting ---
+crafting:
+  # Message sent to a player who tries to craft a mace when all LIMITED slots are full.
+  # Placeholders: {count}, {max}
+  slot-full-message: "§cAll standard mace slots are currently full ({count}/{max}). A slot may open if a mace is destroyed."
+
+# --- Destruction ---
+destruction:
+  # Grace period in minutes after a mace is destroyed before its slot is officially freed.
+  # Set to 0 for immediate release.
+  slot-free-cooldown-minutes: 0
+
+# --- Notifications ---
+notifications:
+  # Whether to notify all online ops/admins when a mace is crafted.
+  ops-on-craft: true
+  # Whether to notify all online ops/admins when a mace is destroyed.
+  ops-on-destroy: true
+  # Whether to notify all online ops/admins when a duplicate mace is detected and removed.
+  ops-on-dupe: true
+  # Whether to notify all online ops/admins when a periodic scan completes.
+  ops-on-scan-complete: false
+  # Message broadcast to the entire server when a mace enters circulation (craft or admin give).
+  # Placeholders: {player}, {normal_count}, {normal_max}, {full_count}, {full_max}, {total_count}, {total_max}
+  public-craft-message: "§6⚔ {player} has obtained a mace! §7({normal_count}/{normal_max} standard §8| §b{full_count}/{full_max} legendary§7)"
+  # Whether to broadcast a public message when a mace slot opens up after destruction.
+  public-on-slot-open: false
+  # Message broadcast when a slot opens. Only used if public-on-slot-open is true.
+  # Placeholders: {normal_count}, {normal_max}, {full_count}, {full_max}, {total_count}, {total_max}, {tier}
+  public-slot-open-message: "§6A {tier} mace slot has opened! §7({normal_count}/{normal_max} standard §8| §b{full_count}/{full_max} legendary§7)"
+
+# --- Audit ---
+audit:
+  # If true, audit events are also written to plugins/MaceControl/mace-audit.log in addition to the database.
+  log-to-file: true
+  # Maximum number of audit log entries retained per mace (older entries are pruned).
+  max-history-per-mace: 200
+
+# --- Display ---
+display:
+  # Lore lines applied to each tracked mace item.
+  # Use %uid% as a placeholder for the mace's unique ID (e.g. MC-0001).
+  lore-format:
+    LIMITED:
+      - "§7§m                    "
+      - "§7Mace §f#%uid%"
+      - "§7§m                    "
+    FULL:
+      - "§b§m                    "
+      - "§b§lLegendary Mace §f#%uid%"
+      - "§b§m                    "
+
+# --- Scan Performance ---
+performance:
+  # Number of chunks processed per server tick during a deep scan. Lower values = less lag, slower scans.
+  chunks-per-tick: 50
