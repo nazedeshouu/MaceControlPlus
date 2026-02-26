@@ -150,7 +150,7 @@ The base `/mace` command (showing public slot counts) requires no permission.
 ## Building From Source
 
 ```bash
-git clone https://github.com/your-org/MaceControl.git
+git clone [https://github.com/nazedeshouu/MaceControlPlus.git]
 cd MaceControl
 mvn clean package
 ```
