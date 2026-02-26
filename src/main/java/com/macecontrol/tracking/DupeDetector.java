@@ -14,6 +14,8 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.UUID;
+
 /**
  * Validates mace ItemStacks on every encounter and enforces the zero-tolerance
  * anti-duplication policy.
@@ -95,7 +97,8 @@ public class DupeDetector {
 
         // --- Step 3: duplicate check ---
         String uid = identifier.getUid(item);
-        if (uid != null && isDuplicate(uid, foundLocation)) {
+        UUID finderUuid = player != null ? player.getUniqueId() : null;
+        if (uid != null && isDuplicate(uid, foundLocation, finderUuid)) {
             confiscateDuplicate(item, uid, player, inventory, entity);
             return true;
         }
@@ -114,12 +117,18 @@ public class DupeDetector {
      * <p>
      * The registry entry is the authoritative "real" copy; any newly encountered
      * copy at a different location is the duplicate and should be confiscated.
+     * <p>
+     * For player-held items ({@link MaceLocationType#PLAYER_INVENTORY},
+     * {@link MaceLocationType#PLAYER_ENDERCHEST}, {@link MaceLocationType#OFFLINE_PLAYER}),
+     * identity is established via the stored holder UUID rather than block coordinates,
+     * because players move and their inventory location is always their current position.
      *
-     * @param uid     the mace UID to check
-     * @param foundAt the location where this copy was found
+     * @param uid        the mace UID to check
+     * @param foundAt    the location where this copy was found
+     * @param finderUuid the UUID of the player who currently holds the item, or {@code null}
      * @return {@code true} if this is a duplicate copy that should be confiscated
      */
-    public boolean isDuplicate(String uid, Location foundAt) {
+    public boolean isDuplicate(String uid, Location foundAt, @Nullable UUID finderUuid) {
         MaceEntry entry = registry.getEntry(uid);
         if (entry == null) {
             // Not in registry at all — treat as unregistered (caller should never reach here)
@@ -129,19 +138,37 @@ public class DupeDetector {
             // Item supposedly destroyed/revoked but physically present — treat as dupe
             return true;
         }
-        // If the entry's last-known location matches foundAt, not a dupe
-        if (locationsMatch(entry, foundAt)) {
+
+        MaceLocationType entryType = entry.getLocationType();
+
+        // For player-held items: use UUID matching instead of coordinates.
+        // Players move constantly so stored XYZ is only valid at the instant it was recorded.
+        if (entryType == MaceLocationType.PLAYER_INVENTORY
+                || entryType == MaceLocationType.PLAYER_ENDERCHEST
+                || entryType == MaceLocationType.OFFLINE_PLAYER) {
+            UUID storedUuid = entry.getLocationHolderUuid();
+            if (storedUuid != null && finderUuid != null) {
+                // Same player currently holds it — definitely not a duplicate
+                if (storedUuid.equals(finderUuid)) return false;
+                // Different player has an item claiming the same UID — duplicate
+                return true;
+            }
+            // UUID unavailable on one or both sides — fall back to world sanity check only
+            if (entry.getLocationWorld() != null && foundAt != null && foundAt.getWorld() != null) {
+                return !entry.getLocationWorld().equals(foundAt.getWorld().getName());
+            }
+            // Cannot determine — be lenient rather than destroying a legitimate mace
             return false;
         }
-        // Different location — could be a real move not yet recorded, or a dupe.
-        // We conservatively treat it as a dupe only if it was RECENTLY verified at
-        // a different location. If locationUpdatedAt is very old the mace may simply
-        // have moved without an event firing (e.g. hopper edge case).
-        // For safety: if the registry entry has ANY recorded active location that
-        // differs from foundAt, treat as dupe.
-        return entry.getLocationType() != null
-                && entry.getLocationType() != MaceLocationType.UNKNOWN
-                && entry.getLocationWorld() != null;
+
+        // For non-player-held items (ground entities, containers, item frames):
+        // Do NOT use coordinate comparison. Items on the ground move due to physics/gravity
+        // between the drop event and the pickup event, so the stored coordinates are
+        // routinely stale. Containers are regularly fed by hoppers and dispensers between
+        // registry updates. A location mismatch is therefore normal event-tracking lag,
+        // not evidence of duplication. Accept any encounter and let the caller update the
+        // registry to the new location.
+        return false;
     }
 
     // =========================================================================

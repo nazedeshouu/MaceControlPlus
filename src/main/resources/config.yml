@@ -86,13 +86,11 @@ display:
   # Use %uid% as a placeholder for the mace's unique ID (e.g. MC-0001).
   lore-format:
     LIMITED:
-      - "§7§m                    "
-      - "§7Mace §f#%uid%"
-      - "§7§m                    "
+      - "§f⚔ §7Standard Mace"
+      - "§8#§7%uid%"
     FULL:
-      - "§b§m                    "
-      - "§b§lLegendary Mace §f#%uid%"
-      - "§b§m                    "
+      - "§b⚔ §b§lLegendary Mace"
+      - "§8#§b%uid%"
 
 # --- Scan Performance ---
 performance:

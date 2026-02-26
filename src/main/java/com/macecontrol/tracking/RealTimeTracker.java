@@ -23,6 +23,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.ItemMergeEvent;
 import org.bukkit.event.hanging.HangingBreakEvent;
+import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
@@ -105,40 +106,44 @@ public class RealTimeTracker implements Listener {
         ItemStack cursor  = event.getCursor();
         ItemStack current = event.getCurrentItem();
 
-        // Check cursor item (player just placed into a slot)
+        // Check cursor item (player just placed from cursor into a slot)
         if (cursor != null && cursor.getType() == Material.MACE) {
-            handleInventoryMaceMove(cursor, player, event.getClickedInventory(), event.getInventory(), null);
+            // Destination is the clicked inventory (where the cursor item lands)
+            handleInventoryMaceMove(cursor, player, event.getInventory(), event.getClickedInventory(), null);
         }
 
-        // Check clicked slot item (player just picked up from a slot)
+        // Check clicked slot item (player just interacted with the item in a slot)
         if (current != null && current.getType() == Material.MACE) {
-            handleInventoryMaceMove(current, player, event.getInventory(), event.getClickedInventory(), null);
+            InventoryAction action = event.getAction();
+            if (action == InventoryAction.MOVE_TO_OTHER_INVENTORY) {
+                // Shift-click: item moves to the OTHER inventory, not the clicked one.
+                Inventory dest = (event.getClickedInventory() == event.getView().getTopInventory())
+                        ? event.getView().getBottomInventory()
+                        : event.getView().getTopInventory();
+                handleInventoryMaceMove(current, player, event.getClickedInventory(), dest, null);
+            } else if (isPickupToCursorAction(action)) {
+                // Item goes to the player's cursor (i.e. player possession).
+                // Use player inventory as destination so it gets tracked as PLAYER_INVENTORY
+                // with UUID, which is immune to position-drift false dupes.
+                handleInventoryMaceMove(current, player, event.getClickedInventory(), player.getInventory(), null);
+            } else {
+                // Other actions (swap, collect, etc.): fall through to default handling.
+                handleInventoryMaceMove(current, player, event.getInventory(), event.getClickedInventory(), null);
+            }
         }
 
         // Handle hotbar swap (NUMBER_KEY) — swapped item may be a mace
-        switch (event.getClick()) {
-            case NUMBER_KEY -> {
-                ItemStack hotbar = player.getInventory().getItem(event.getHotbarButton());
-                if (hotbar != null && hotbar.getType() == Material.MACE) {
-                    handleInventoryMaceMove(hotbar, player, null, event.getClickedInventory(), null);
-                }
+        // Note: DROP/CONTROL_DROP (Q-key) is intentionally NOT handled here.
+        // PlayerDropItemEvent fires for those and is the sole handler, avoiding
+        // a race condition where this click handler would set GROUND_ENTITY with
+        // player.getLocation() before PlayerDropItemEvent fires with the actual
+        // item entity position — a coordinate mismatch that could trigger false
+        // duplicate detection.
+        if (event.getClick() == org.bukkit.event.inventory.ClickType.NUMBER_KEY) {
+            ItemStack hotbar = player.getInventory().getItem(event.getHotbarButton());
+            if (hotbar != null && hotbar.getType() == Material.MACE) {
+                handleInventoryMaceMove(hotbar, player, null, event.getClickedInventory(), null);
             }
-            case DROP, CONTROL_DROP -> {
-                // Item dropped from inventory — DROP event will handle the entity side,
-                // but we update the registry to GROUND_ENTITY here too as a safety net.
-                ItemStack dropped = event.getCurrentItem();
-                if (dropped != null && dropped.getType() == Material.MACE) {
-                    String uid = identifier.getUid(dropped);
-                    if (uid != null && !dupeDetector.validateAndProcess(
-                            dropped, player, player.getLocation(), null, null)) {
-                        updateLocation(uid, MaceLocationType.GROUND_ENTITY,
-                                player.getLocation(), player.getUniqueId(), player.getName(), null);
-                        auditLogger.log(uid, "DROP", "Keyboard drop from inventory",
-                                player.getUniqueId(), player.getName(), player.getLocation());
-                    }
-                }
-            }
-            default -> { /* handled above */ }
         }
     }
 
@@ -216,12 +221,22 @@ public class RealTimeTracker implements Listener {
         Location invLoc = resolveInventoryLocation(inv, player);
         String containerType = classifyContainerType(inv);
 
+        // For player-associated location types, preserve the holder UUID so that
+        // isDuplicate can use UUID matching instead of falling back to the weaker
+        // world-only sanity check. Without this, closing an ender chest would
+        // overwrite the stored UUID with null, weakening dupe detection.
+        boolean isPlayerLocation = (locType == MaceLocationType.PLAYER_INVENTORY
+                || locType == MaceLocationType.PLAYER_ENDERCHEST);
+
         for (ItemStack item : inv.getContents()) {
             if (item == null || item.getType() != Material.MACE) continue;
             if (dupeDetector.validateAndProcess(item, player, invLoc, inv, null)) continue;
             String uid = identifier.getUid(item);
             if (uid == null) continue;
-            updateLocation(uid, locType, invLoc, null, null, containerType);
+            updateLocation(uid, locType, invLoc,
+                    isPlayerLocation ? player.getUniqueId() : null,
+                    isPlayerLocation ? player.getName() : null,
+                    containerType);
         }
     }
 
@@ -253,31 +268,45 @@ public class RealTimeTracker implements Listener {
 
     /**
      * Tracks an entity (usually a player) picking up a mace item entity.
+     * <p>
+     * Runs at HIGH priority (not MONITOR) so we can cancel the event before Bukkit
+     * transfers the item to the entity's inventory. At MONITOR the transfer has already
+     * happened and cancellation has no effect, meaning a confiscated item would still
+     * end up in the picker's inventory.
      */
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onEntityPickupItem(EntityPickupItemEvent event) {
         Item droppedItem = event.getItem();
         ItemStack item = droppedItem.getItemStack();
         if (item.getType() != Material.MACE) return;
 
         Entity picker = event.getEntity();
-        Location loc = picker.getLocation();
+        // Use the item entity's own location for duplicate validation — the stored registry
+        // location is where the item was last seen (on the ground), not where the player is.
+        Location itemLoc   = droppedItem.getLocation();
+        Location playerLoc = picker.getLocation();
 
         if (picker instanceof Player player) {
-            if (dupeDetector.validateAndProcess(item, player, loc,
-                    player.getInventory(), droppedItem)) return;
+            if (dupeDetector.validateAndProcess(item, player, itemLoc,
+                    player.getInventory(), droppedItem)) {
+                event.setCancelled(true); // prevent item entering inventory
+                return;
+            }
             String uid = identifier.getUid(item);
             if (uid == null) return;
             updateLocation(uid, MaceLocationType.PLAYER_INVENTORY,
-                    loc, player.getUniqueId(), player.getName(), null);
+                    playerLoc, player.getUniqueId(), player.getName(), null);
             auditLogger.log(uid, "PICKUP", "Player picked up",
-                    player.getUniqueId(), player.getName(), loc);
+                    player.getUniqueId(), player.getName(), playerLoc);
         } else {
             // Non-player entity picked up mace (rare, but handle it)
-            if (dupeDetector.validateAndProcess(item, null, loc, null, droppedItem)) return;
+            if (dupeDetector.validateAndProcess(item, null, itemLoc, null, droppedItem)) {
+                event.setCancelled(true);
+                return;
+            }
             String uid = identifier.getUid(item);
             if (uid == null) return;
-            updateLocation(uid, MaceLocationType.UNKNOWN, loc, null, null,
+            updateLocation(uid, MaceLocationType.UNKNOWN, playerLoc, null, null,
                     picker.getType().name());
             auditLogger.log(uid, "PICKUP", "Non-player pickup: " + picker.getType().name());
         }
@@ -574,16 +603,23 @@ public class RealTimeTracker implements Listener {
                                          @org.jetbrains.annotations.Nullable Inventory from,
                                          @org.jetbrains.annotations.Nullable Inventory to,
                                          @org.jetbrains.annotations.Nullable Item entity) {
-        Location loc = player.getLocation();
+        Location playerLoc = player.getLocation();
+        // Use the source inventory's actual location for the duplicate check.
+        // This makes the stored XYZ match for CONTAINER-type entries (chests, anvils, etc.)
+        // instead of comparing against the player's current standing position.
+        // Falls back to player location for cursor items and null-holder inventories.
+        Location validLoc = resolveInventoryLocation(from, player);
+        if (validLoc == null) validLoc = playerLoc;
+
         Inventory targetInv = to != null ? to : from;
-        if (dupeDetector.validateAndProcess(item, player, loc, targetInv, entity)) return;
+        if (dupeDetector.validateAndProcess(item, player, validLoc, targetInv, entity)) return;
 
         String uid = identifier.getUid(item);
         if (uid == null) return;
 
         MaceLocationType locType = to != null ? classifyInventory(to, player)
                 : MaceLocationType.PLAYER_INVENTORY;
-        Location invLoc = to != null ? resolveInventoryLocation(to, player) : loc;
+        Location invLoc = to != null ? resolveInventoryLocation(to, player) : playerLoc;
         String containerType = to != null ? classifyContainerType(to) : null;
 
         updateLocation(uid, locType, invLoc, player.getUniqueId(), player.getName(), containerType);
@@ -632,10 +668,23 @@ public class RealTimeTracker implements Listener {
 
     /**
      * Classifies an inventory's location type based on its holder and type.
+     * <p>
+     * Temporary interactive workstations (anvil, crafting table, grindstone, etc.) are
+     * classified as {@link MaceLocationType#PLAYER_INVENTORY} so the mace is tracked by
+     * player UUID rather than block coordinates. This prevents false duplicate detection
+     * when the player moves while using a workstation — since the item is effectively
+     * "in the player's possession" during the interaction session.
      */
     private MaceLocationType classifyInventory(Inventory inv, @org.jetbrains.annotations.Nullable Player player) {
         if (inv.getHolder() instanceof Player) return MaceLocationType.PLAYER_INVENTORY;
         if (inv.getType() == InventoryType.ENDER_CHEST) return MaceLocationType.PLAYER_ENDERCHEST;
+        // Treat temporary workstations as player-held (UUID-matched, not XYZ-matched).
+        switch (inv.getType()) {
+            case ANVIL, WORKBENCH, GRINDSTONE, SMITHING, ENCHANTING, STONECUTTER,
+                 CARTOGRAPHY, LOOM, BLAST_FURNACE, SMOKER, FURNACE ->
+                    { return MaceLocationType.PLAYER_INVENTORY; }
+            default -> { /* fall through */ }
+        }
         return classifyContainerByHolder(inv.getHolder());
     }
 
@@ -686,6 +735,19 @@ public class RealTimeTracker implements Listener {
         if (holder instanceof Player p) return p.getLocation();
         if (holder instanceof org.bukkit.entity.Entity e) return e.getLocation();
         return player != null ? player.getLocation() : null;
+    }
+
+    /**
+     * Returns {@code true} if the given {@link InventoryAction} represents the slot item
+     * moving to the player's cursor (i.e. the player is picking the item up).
+     * These actions mean the item leaves its current slot and enters the player's possession.
+     */
+    private boolean isPickupToCursorAction(InventoryAction action) {
+        return action == InventoryAction.PICKUP_ALL
+                || action == InventoryAction.PICKUP_HALF
+                || action == InventoryAction.PICKUP_SOME
+                || action == InventoryAction.PICKUP_ONE
+                || action == InventoryAction.SWAP_WITH_CURSOR; // slot item goes to cursor
     }
 
     /**

@@ -11,12 +11,14 @@ import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.DoubleChest;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.ItemFrame;
 import org.bukkit.entity.GlowItemFrame;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.DoubleChestInventory;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
@@ -68,6 +70,9 @@ public class PeriodicScanner {
     /** Epoch-second timestamp when the next scan is scheduled, or 0 if not yet scheduled. */
     private volatile long nextScanScheduledAt = 0L;
 
+    /** Guard flag to prevent concurrent scans from corrupting shared scan state. */
+    private volatile boolean scanInProgress = false;
+
     /**
      * UIDs verified during the current scan run (reset each scan).
      * Thread-confined to the main thread during phases 1-3.
@@ -79,6 +84,17 @@ public class PeriodicScanner {
      * Thread-confined to the main thread during phases 1-3.
      */
     private final Map<String, List<org.bukkit.Location>> foundLocations = new HashMap<>();
+
+    /**
+     * Canonical locations of double chests already processed during this scan.
+     * Keyed as "world:x:y:z" of the left-half chest block.
+     * <p>
+     * A double chest consists of two adjacent tile entities that both expose the
+     * same shared {@link DoubleChestInventory}. Without this guard, both halves
+     * would be iterated in {@link #processChunk}, adding the same mace to
+     * {@link #foundLocations} twice and falsely triggering the Phase 6 dupe sweep.
+     */
+    private final Set<String> processedDoubleChestLocations = new HashSet<>();
 
     /**
      * Constructs a new PeriodicScanner.
@@ -124,10 +140,22 @@ public class PeriodicScanner {
     /**
      * Triggers an immediate full scan, bypassing the scheduled timer.
      * Optionally reports results to a command sender.
+     * <p>
+     * If a scan is already in progress, the request is rejected and the requester
+     * is notified. This prevents concurrent scans from corrupting shared scan state
+     * ({@link #verifiedThisScan}, {@link #foundLocations}), which would cause
+     * Phase 5 reconciliation to wrongly increment missing-scan counters.
      *
      * @param requester the command sender to notify on completion, or {@code null}
      */
     public void runImmediateScan(@Nullable CommandSender requester) {
+        if (scanInProgress) {
+            if (requester != null) {
+                requester.sendMessage("§cA scan is already in progress. Please wait for it to finish.");
+            }
+            plugin.getLogger().warning("[MaceControl] Immediate scan rejected — scan already in progress.");
+            return;
+        }
         plugin.getLogger().info("[MaceControl] Immediate scan started"
                 + (requester != null ? " by " + requester.getName() : "") + ".");
         runScan(requester);
@@ -160,8 +188,15 @@ public class PeriodicScanner {
      * @param requester optional command sender to report results to
      */
     private void runScan(@Nullable CommandSender requester) {
+        if (scanInProgress) {
+            plugin.getLogger().warning("[MaceControl] Scan already in progress — skipping.");
+            return;
+        }
+        scanInProgress = true;
+
         verifiedThisScan.clear();
         foundLocations.clear();
+        processedDoubleChestLocations.clear();
 
         plugin.getLogger().info("[MaceControl] Periodic scan started.");
 
@@ -259,6 +294,25 @@ public class PeriodicScanner {
             Inventory inv = holder.getInventory();
             org.bukkit.Location loc = state.getLocation();
             MaceLocationType locType = classifyBlockState(state);
+
+            // Double chest deduplication: a double chest is two adjacent tile entities
+            // that both expose the same shared DoubleChestInventory. Without this guard,
+            // the same mace would be added to foundLocations at two different block
+            // coordinates, incorrectly triggering the Phase 6 dupe sweep.
+            // Use the left half's block location as the canonical position.
+            if (inv instanceof DoubleChestInventory dci) {
+                DoubleChest dc = dci.getHolder();
+                if (dc != null && dc.getLeftSide() instanceof org.bukkit.block.Chest leftChest) {
+                    org.bukkit.Location canonLoc = leftChest.getLocation();
+                    if (canonLoc != null && canonLoc.getWorld() != null) {
+                        String key = canonLoc.getWorld().getName() + ":"
+                                + canonLoc.getBlockX() + ":" + canonLoc.getBlockY()
+                                + ":" + canonLoc.getBlockZ();
+                        if (!processedDoubleChestLocations.add(key)) continue; // right half — skip
+                        loc = canonLoc; // use canonical left-half location in registry
+                    }
+                }
+            }
 
             for (ItemStack item : inv.getContents()) {
                 if (item == null) continue;
@@ -450,9 +504,11 @@ public class PeriodicScanner {
         MaceLocationType locType = entry.getLocationType();
         if (locType == null) return false;
 
-        // Offline player — only accessible if scan-offline-players is enabled
+        // Offline player — Phase 4 cannot actually verify offline player inventories
+        // (it is a no-op without NMS). Never penalize offline players; their maces
+        // will be validated when they log in via RealTimeTracker.onPlayerJoin.
         if (locType == MaceLocationType.OFFLINE_PLAYER) {
-            return config.isScanOfflinePlayers();
+            return false;
         }
 
         // Check if the chunk was loaded during this scan
@@ -540,6 +596,7 @@ public class PeriodicScanner {
      * and schedules the next periodic scan.
      */
     private void completeScan(@Nullable CommandSender requester) {
+        scanInProgress = false;
         lastScanCompletedAt = Instant.now().getEpochSecond();
 
         int totalActive  = registry.countActive();
